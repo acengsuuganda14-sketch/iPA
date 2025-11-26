@@ -19,23 +19,28 @@ jobs:
           architecture: x64
 
       # 3. Install dependencies
-      - run: flutter pub get
+      - name: Get Flutter packages
+        run: flutter pub get
         working-directory: .
 
       # 4. Update CocoaPods
-      - run: pod repo update
+      - name: Update CocoaPods
+        run: pod repo update
         working-directory: ios
 
       # 5. Build iOS app (release, no codesign)
-      - run: flutter build ios --release --no-codesign
+      - name: Build iOS app
+        run: flutter build ios --release --no-codesign
         working-directory: .
 
       # 6. Siapkan Payload untuk IPA
-      - run: mkdir -p build/ios/iphoneos/Payload
-      - run: mv build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+      - name: Prepare Payload folder
+        run: |
+          mkdir -p build/ios/iphoneos/Payload
+          mv build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
 
       # 7. Buat file IPA
-      - name: Zip output
+      - name: Zip output into IPA
         run: zip -qq -r -9 FlutterIpaExport.ipa Payload
         working-directory: build/ios/iphoneos
 
