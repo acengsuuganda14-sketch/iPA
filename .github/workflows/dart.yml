@@ -1,63 +1,219 @@
-name: iOS-ipa-build
+name: 🚀 iOS IPA Build & Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release-version:
+        description: 'Release Version (format: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      build-type:
+        description: 'Build Type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+        - release
+        - profile
+
+env:
+  FLUTTER_CHANNEL: stable
+  BUILD_TYPE: release
 
 jobs:
   build-ios:
-    name: 🎉 Build iOS and Upload IPA
+    name: 📱 Build iOS IPA
     runs-on: macos-latest
-
+    
     steps:
-      # 1. Checkout repo
-      - uses: actions/checkout@v3
-
-      # 2. Setup Flutter
-      - uses: subosito/flutter-action@v2
+      # 1. Checkout repository dengan depth lengkap
+      - name: 🔍 Checkout Repository
+        uses: actions/checkout@v4
         with:
-          channel: 'stable'
-          architecture: x64
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. Install dependencies
-      - name: Get Flutter packages
-        run: flutter pub get
+      # 2. Setup Flutter dengan caching
+      - name: ⚙️ Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          architecture: x64
+          cache: true
+          cache-key: flutter-${{ env.FLUTTER_CHANNEL }}-${{ hashFiles('pubspec.lock') }}
+          cache-path: ${{ runner.tool_cache }}/flutter
+
+      # 3. Validate Flutter installation
+      - name: 🔧 Validate Flutter
+        run: |
+          flutter --version
+          flutter doctor -v
+          which pod
+
+      # 4. Install dependencies dengan error handling
+      - name: 📦 Install Dependencies
+        run: |
+          set -e
+          flutter pub get
+          flutter pub deps --style=compact
         working-directory: .
 
-      # 4. Update CocoaPods
-      - name: Update CocoaPods
-        run: pod repo update
+      # 5. Setup iOS dependencies
+      - name: 🍎 Setup iOS Dependencies
+        run: |
+          set -e
+          pod repo update
+          pod install --clean-install --repo-update
         working-directory: ios
 
-      # 5. Build iOS app (release, no codesign)
-      - name: Build iOS app
-        run: flutter build ios --release --no-codesign
-        working-directory: .
-
-      # 6. Siapkan Payload untuk IPA
-      - name: Prepare Payload folder
+      # 6. Clean build directory
+      - name: 🧹 Clean Previous Builds
         run: |
-          mkdir -p build/ios/iphoneos/Payload
-          mv build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+          flutter clean
+          rm -rf build/ios
+          rm -rf *.ipa || true
 
-      # 7. Buat file IPA
-      - name: Zip output into IPA
-        run: zip -qq -r -9 FlutterIpaExport.ipa Payload
-        working-directory: build/ios/iphoneos
-
-      # 8. Pastikan tag v1.0 ada
-      - name: Ensure tag exists
+      # 7. Build iOS dengan error handling
+      - name: 🔨 Build iOS App
         run: |
-          git fetch --tags
-          if ! git rev-parse "v1.0" >/dev/null 2>&1; then
-            git tag v1.0
-            git push origin v1.0
+          set -e
+          echo "Building iOS ${{ env.BUILD_TYPE }} version..."
+          flutter build ios --${{ env.BUILD_TYPE }} --no-codesign --verbose
+          
+          # Verify build output
+          if [ ! -d "build/ios/iphoneos/Runner.app" ]; then
+            echo "❌ Build failed: Runner.app not found"
+            exit 1
+          fi
+          
+          echo "✅ Build completed successfully"
 
-      # 9. Upload ke GitHub Release menggunakan token otomatis
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+      # 8. Extract version from pubspec.yaml
+      - name: 🏷️ Extract Version Info
+        id: version
+        run: |
+          set -e
+          VERSION=$(grep 'version:' pubspec.yaml | head -1 | awk -F' ' '{print $2}' | tr -d '\r')
+          APP_NAME=$(grep 'name:' pubspec.yaml | head -1 | awk -F' ' '{print $2}' | tr -d '\r')
+          
+          echo "Extracted version: $VERSION"
+          echo "App name: $APP_NAME"
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          
+          # Write to environment file for subsequent steps
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+
+      # 9. Create IPA package
+      - name: 📦 Create IPA Package
+        id: package_ipa
+        run: |
+          set -e
+          cd build/ios/iphoneos
+          
+          # Create Payload directory
+          mkdir -p Payload
+          
+          # Move app to Payload
+          cp -r Runner.app Payload/
+          
+          # Create IPA with timestamp
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          IPA_NAME="${{ env.APP_NAME }}_${{ env.APP_VERSION }}_$TIMESTAMP.ipa"
+          
+          zip -qr "$IPA_NAME" Payload
+          
+          # Move IPA to root directory
+          mv "$IPA_NAME" ../../../
+          
+          # Set output
+          echo "ipa_name=$IPA_NAME" >> $GITHUB_OUTPUT
+          echo "ipa_path=$GITHUB_WORKSPACE/$IPA_NAME" >> $GITHUB_OUTPUT
+          
+          echo "✅ IPA created: $IPA_NAME"
+          
+          # Verify IPA file
+          if [ ! -f "../../../$IPA_NAME" ]; then
+            echo "❌ IPA creation failed"
+            exit 1
+          fi
+
+      # 10. Create Git tag
+      - name: 🏷️ Create Git Tag
+        id: create_tag
+        run: |
+          set -e
+          TAG_NAME="${{ inputs.release-version }}"
+          
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "⚠️ Tag $TAG_NAME already exists. Deleting and recreating..."
+            git tag -d "$TAG_NAME" || true
+            git push --delete origin "$TAG_NAME" || true
+          fi
+          
+          # Create new tag
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME - Built on $(date)"
+          git push origin "$TAG_NAME"
+          
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "✅ Tag $TAG_NAME created and pushed"
+
+      # 11. Create GitHub Release
+      - name: 🚀 Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/ios/iphoneos/FlutterIpaExport.ipa
-          tag: v1.0
-          overwrite: true
-          body: "This is first release"
+          tag_name: ${{ steps.create_tag.outputs.tag_name }}
+          release_name: "Release ${{ steps.create_tag.outputs.tag_name }} - ${{ env.APP_NAME }}"
+          body: |
+            🚀 **${{ env.APP_NAME }} v${{ env.APP_VERSION }}**
+            
+            **Build Information:**
+            - **Version:** ${{ env.APP_VERSION }}
+            - **Build Type:** ${{ env.BUILD_TYPE }}
+            - **Flutter Channel:** ${{ env.FLUTTER_CHANNEL }}
+            - **Build Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            
+            **Installation:**
+            - Download the .ipa file
+            - Install using tools like AltStore, Cydia Impactor, or Apple Configurator
+            
+            **Notes:**
+            This is an unsigned IPA for testing purposes.
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.package_ipa.outputs.ipa_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 12. Upload IPA as artifact (backup)
+      - name: 💾 Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa-${{ steps.create_tag.outputs.tag_name }}
+          path: ${{ steps.package_ipa.outputs.ipa_path }}
+          retention-days: 30
+
+  # Optional: Notify success
+  notify:
+    name: 📢 Notification
+    runs-on: ubuntu-latest
+    needs: build-ios
+    if: always()
+    
+    steps:
+      - name: ✅ Build Status
+        run: |
+          if [ "${{ needs.build-ios.result }}" == "success" ]; then
+            echo "🎉 Build successful! IPA uploaded to Release: ${{ needs.build-ios.outputs.tag_name }}"
+            echo "📱 Download URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.build-ios.outputs.tag_name }}"
+          else
+            echo "❌ Build failed! Check the logs for details."
+            exit 1
+          fi
